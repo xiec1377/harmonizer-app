@@ -44,7 +44,7 @@ backend/            FastAPI + Python
 cd backend
 python -m venv .venv 
 .venv/bin/activate #.\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
+pip install -r requirements.txt #python -m pip install basic-pitch
 cp ../.env.example .env    # fill in ANTHROPIC_API_KEY
 uvicorn app.main:app --reload --port 8000
 ```

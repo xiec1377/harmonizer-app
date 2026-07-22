@@ -7,6 +7,7 @@ import structlog
 from typing import Tuple, List
 from app.models.schemas import Note, ChordSegment
 
+
 log = structlog.get_logger()
 
 MIDI_NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
@@ -218,3 +219,55 @@ def _chroma_to_chord(chroma: np.ndarray) -> dict:
     ]
 
     return {"root": root_name, "quality": best_quality, "notes": chord_notes}
+
+
+# def _basic_pitch_predict(file_path: str):
+#     return predict(file_path)
+
+async def transcribe_basic_pitch(file_path: str):
+    # loop = asyncio.get_event_loop()
+    # _, _, note_events = await loop.run_in_executor(None, _basic_pitch_predict, file_path)
+
+    # notes = []
+    # for start, end, midi, velocity, pitch_bend in note_events:
+    #     midi_int = int(round(float(midi)))
+    #     octave = (midi_int // 12) - 1
+    #     names = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+    #     notes.append({
+    #         "name": f"{names[midi_int % 12]}{octave}",
+    #         "midi": midi_int,
+    #         "start": round(float(start), 3),
+    #         "end": round(float(end), 3),
+    #         "velocity": int(velocity),
+    #     })
+        
+    # print("notes:", notes)
+
+    y, sr = librosa.load(file_path, sr=None, mono=True)
+
+    chroma = librosa.feature.chroma_stft(y=y, sr=sr)
+    dominant_pitch_indices = np.argmax(chroma, axis=0)
+
+    note_names = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+    print("note_names:", note_names)
+
+    rms = librosa.feature.rms(y=y)[0]
+    threshold = float(np.mean(rms) * 0.5)
+
+    melody_notes = []
+    for frame, pitch_idx in enumerate(dominant_pitch_indices):
+        if frame < len(rms) and rms[frame] > threshold:
+            melody_notes.append(note_names[int(pitch_idx)])
+        else:
+            melody_notes.append("Rest")
+
+    if not melody_notes:
+        return []
+
+    compressed_melody = [melody_notes[0]]
+    for note in melody_notes[1:]:
+        if note != compressed_melody[-1]:
+            compressed_melody.append(note)
+
+    print("compressed_melody:", compressed_melody)
+    return compressed_melody
