@@ -221,27 +221,7 @@ def _chroma_to_chord(chroma: np.ndarray) -> dict:
     return {"root": root_name, "quality": best_quality, "notes": chord_notes}
 
 
-# def _basic_pitch_predict(file_path: str):
-#     return predict(file_path)
-
 async def transcribe_basic_pitch(file_path: str):
-    # loop = asyncio.get_event_loop()
-    # _, _, note_events = await loop.run_in_executor(None, _basic_pitch_predict, file_path)
-
-    # notes = []
-    # for start, end, midi, velocity, pitch_bend in note_events:
-    #     midi_int = int(round(float(midi)))
-    #     octave = (midi_int // 12) - 1
-    #     names = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
-    #     notes.append({
-    #         "name": f"{names[midi_int % 12]}{octave}",
-    #         "midi": midi_int,
-    #         "start": round(float(start), 3),
-    #         "end": round(float(end), 3),
-    #         "velocity": int(velocity),
-    #     })
-        
-    # print("notes:", notes)
 
     y, sr = librosa.load(file_path, sr=None, mono=True)
 

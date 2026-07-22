@@ -1,7 +1,8 @@
-import { useCallback, useState, useRef } from "react";
+import { useCallback, useState, useRef, useEffect } from "react";
 import { Upload, Music, AlertCircle } from "lucide-react";
 import { uploadAudio, generateHarmony } from "../lib/api";
 import { useStore } from "../lib/store";
+import { OpenSheetMusicDisplay } from "opensheetmusicdisplay";
 
 export function UploadStage() {
   const [dragging, setDragging] = useState(false);
@@ -15,53 +16,86 @@ export function UploadStage() {
     setError,
     error,
   } = useStore();
+  const osmdRef = useRef<HTMLDivElement | null>(null);
+  const [musicxml, setMusicxml] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!musicxml || !osmdRef.current) return;
+
+    let cancelled = false;
+
+    const renderScore = async () => {
+      const osmd = new OpenSheetMusicDisplay(osmdRef.current!);
+      await osmd.load(musicxml);
+      if (!cancelled) {
+        osmd.render();
+      }
+    };
+
+    renderScore();
+
+    return () => {
+      cancelled = true;
+      if (osmdRef.current) {
+        osmdRef.current.innerHTML = "";
+      }
+    };
+  }, [musicxml]);
 
   const process = useCallback(
     async (file: File) => {
-      setError(null);
-      setProgress("Analyzing audio...");
-      setStage("analyzing");
-      console.log("PROCESSING FILE....");
+      try {
+        setError(null);
+        setProgress("Analyzing audio...");
+        // setStage("analyzing");
+        console.log("PROCESSING FILE....");
 
-      // try {
-      //   setAudioFile(file)
-      //   const analysis = await uploadAudio(file)
-      //   setAudioAnalysis(analysis)
+        // try {
+        //   setAudioFile(file)
+        //   const analysis = await uploadAudio(file)
+        //   setAudioAnalysis(analysis)
 
-      //   setProgress('Generating harmonies with AI...')
-      //   const harmony = await generateHarmony(
-      //     analysis.notes,
-      //     analysis.chords,
-      //     analysis.key,
-      //     analysis.mode,
-      //     analysis.tempo_bpm,
-      //   )
-      //   setHarmonyAnalysis(harmony)
-      //   setStage('harmony')
-      // } catch (e: unknown) {
-      //   const msg = e instanceof Error ? e.message : 'Something went wrong'
-      //   setError(msg)
-      //   setStage('upload')
-      // } finally {
-      //   setProgress(null)
-      // }
+        //   setProgress('Generating harmonies with AI...')
+        //   const harmony = await generateHarmony(
+        //     analysis.notes,
+        //     analysis.chords,
+        //     analysis.key,
+        //     analysis.mode,
+        //     analysis.tempo_bpm,
+        //   )
+        //   setHarmonyAnalysis(harmony)
+        //   setStage('harmony')
+        // } catch (e: unknown) {
+        //   const msg = e instanceof Error ? e.message : 'Something went wrong'
+        //   setError(msg)
+        //   setStage('upload')
+        // } finally {
+        //   setProgress(null)
+        // }
 
-      const formData = new FormData();
-      formData.append("file", file);
+        const formData = new FormData();
+        formData.append("file", file);
 
-      const response = await fetch("/api/audio/transcribe", {
-        method: "POST",
-        body: formData,
-      });
+        const response = await fetch("/api/audio/transcribe", {
+          method: "POST",
+          body: formData,
+        });
 
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`Transcription failed: ${errorText}`);
+        if (!response.ok) {
+          const errorText = await response.text();
+          throw new Error(`Transcription failed: ${errorText}`);
+        }
+
+        const result = await response.json();
+        setMusicxml(result.musicxml);
+        // setStage("harmony");
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : "Something went wrong";
+        setError(msg);
+        setStage("upload");
+      } finally {
+        setProgress(null);
       }
-
-      const result = await response.json();
-      console.log("transcribed file:", result);
-      console.log("notes:", result.notes);
     },
     [setStage, setAudioAnalysis, setAudioFile, setHarmonyAnalysis, setError],
   );
@@ -151,6 +185,15 @@ export function UploadStage() {
           </span>
         ))}
       </div>
+
+      {/* <div ref={osmdRef} id="osmd-container" /> */}
+      {musicxml && (
+        <div
+          id="osmd-container"
+          ref={osmdRef}
+          style={{ width: "100%", minHeight: "400px" }}
+        />
+      )}
 
       {/* Error */}
       {error && (
