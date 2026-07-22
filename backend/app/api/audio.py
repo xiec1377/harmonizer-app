@@ -257,9 +257,11 @@ async def transcribe_audio(file: UploadFile = File(...)):
                 if is_voiced and np.isfinite(frequency)
             ]
 
-            # Collapse adjacent pitch frames into readable, sustained score notes.
-            score_notes = []
-            current_midi = None
+            # Collapse adjacent frames while retaining silence as rests. Keeping
+            # rests makes score timestamps line up with the original audio.
+            score_events = []
+            unset = object()
+            current_midi = unset
             start_frame = 0
             for frame_index, (frequency, is_voiced) in enumerate(
                 zip(frequencies, voiced)
@@ -270,28 +272,40 @@ async def transcribe_audio(file: UploadFile = File(...)):
                     else None
                 )
                 if midi != current_midi:
-                    if current_midi is not None:
-                        score_notes.append(
-                            (current_midi, frame_index - start_frame)
-                        )
+                    if current_midi is not unset:
+                        score_events.append((current_midi, frame_index - start_frame))
                     current_midi = midi
                     start_frame = frame_index
 
-            if current_midi is not None:
-                score_notes.append((current_midi, len(frequencies) - start_frame))
+            if current_midi is not unset:
+                score_events.append((current_midi, len(frequencies) - start_frame))
 
             score = stream.Score()
             part = stream.Part()
             part.append(tempo.MetronomeMark(number=120))
             part.append(meter.TimeSignature("4/4"))
             seconds_per_frame = hop_length / sample_rate
-            for midi, frame_count in score_notes:
+            elapsed_frames = 0
+            previous_sixteenth = 0
+            score_note_count = 0
+            for midi, frame_count in score_events:
                 # At 120 BPM, one quarter note lasts 0.5 seconds.
-                raw_quarter_length = frame_count * seconds_per_frame * 2
-                # Use exact sixteenth-note units that MusicXML can represent.
-                sixteenth_count = max(1, round(raw_quarter_length * 4))
+                elapsed_frames += frame_count
+                elapsed_quarter_length = elapsed_frames * seconds_per_frame * 2
+                current_sixteenth = round(elapsed_quarter_length * 4)
+                sixteenth_count = current_sixteenth - previous_sixteenth
+                if sixteenth_count <= 0:
+                    continue
+                previous_sixteenth = current_sixteenth
                 quarter_length = Fraction(sixteenth_count, 4)
-                part.append(note.Note(midi, quarterLength=quarter_length))
+                score_element = (
+                    note.Rest(quarterLength=quarter_length)
+                    if midi is None
+                    else note.Note(midi, quarterLength=quarter_length)
+                )
+                part.append(score_element)
+                if midi is not None:
+                    score_note_count += 1
             score.append(part)
             score.makeNotation(inPlace=True)
 
@@ -304,9 +318,9 @@ async def transcribe_audio(file: UploadFile = File(...)):
                 if os.path.exists(xml_dest):
                     os.remove(xml_dest)
 
-            return pitch_frames, score_notes, musicxml
+            return pitch_frames, score_note_count, musicxml
 
-        notes, score_notes, musicxml = await asyncio.to_thread(detect_pitches)
+        notes, score_note_count, musicxml = await asyncio.to_thread(detect_pitches)
     except HTTPException:
         raise
     except Exception as exc:
@@ -323,7 +337,7 @@ async def transcribe_audio(file: UploadFile = File(...)):
     return {
         "file_id": file_id,
         "filename": file.filename,
-        "note_count": len(score_notes),
+        "note_count": score_note_count,
         "notes": notes,
         "musicxml": musicxml,
     }

@@ -1,5 +1,5 @@
 import { useCallback, useState, useRef, useEffect } from "react";
-import { Upload, Music, AlertCircle } from "lucide-react";
+import { Upload, Music, AlertCircle, Play, Pause } from "lucide-react";
 import { uploadAudio, generateHarmony } from "../lib/api";
 import { useStore } from "../lib/store";
 import { OpenSheetMusicDisplay } from "opensheetmusicdisplay";
@@ -17,7 +17,50 @@ export function UploadStage() {
     error,
   } = useStore();
   const osmdRef = useRef<HTMLDivElement | null>(null);
+  const osmdInstanceRef = useRef<OpenSheetMusicDisplay | null>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const animationFrameRef = useRef<number | null>(null);
+  const cursorAudioTimeRef = useRef(0);
   const [musicxml, setMusicxml] = useState<string | null>(null);
+  const [audioUrl, setAudioUrl] = useState<string | null>(null);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [duration, setDuration] = useState(0);
+
+  const syncScoreCursor = useCallback((audioTime: number) => {
+    const osmd = osmdInstanceRef.current;
+    if (!osmd) return;
+
+    const cursor = osmd.cursor;
+    if (audioTime < cursorAudioTimeRef.current) {
+      cursor.reset();
+      cursor.show();
+    }
+
+    // OSMD timestamps are fractions of a whole note. The generated score is
+    // fixed at 120 BPM, where a whole note lasts two seconds.
+    let steps = 0;
+    while (
+      !cursor.Iterator.EndReached &&
+      cursor.Iterator.CurrentSourceTimestamp.RealValue * 2 < audioTime &&
+      steps < 10000
+    ) {
+      cursor.next();
+      steps += 1;
+    }
+    cursorAudioTimeRef.current = audioTime;
+
+    // Keep the playback cursor about one-third of the way across the visible
+    // staff, leaving upcoming notes visible to the right.
+    const scoreContainer = osmdRef.current;
+    const cursorElement = cursor.cursorElement;
+    if (scoreContainer && cursorElement) {
+      const containerRect = scoreContainer.getBoundingClientRect();
+      const cursorRect = cursorElement.getBoundingClientRect();
+      const desiredLeft = containerRect.left + containerRect.width / 3;
+      scoreContainer.scrollLeft += cursorRect.left - desiredLeft;
+    }
+  }, []);
 
   useEffect(() => {
     if (!musicxml || !osmdRef.current) return;
@@ -25,10 +68,18 @@ export function UploadStage() {
     let cancelled = false;
 
     const renderScore = async () => {
-      const osmd = new OpenSheetMusicDisplay(osmdRef.current!);
+      const osmd = new OpenSheetMusicDisplay(osmdRef.current!, {
+        autoResize: false,
+        followCursor: true,
+        renderSingleHorizontalStaffline: true,
+      });
       await osmd.load(musicxml);
       if (!cancelled) {
         osmd.render();
+        osmd.cursor.reset();
+        osmd.cursor.show();
+        cursorAudioTimeRef.current = 0;
+        osmdInstanceRef.current = osmd;
       }
     };
 
@@ -36,17 +87,54 @@ export function UploadStage() {
 
     return () => {
       cancelled = true;
+      osmdInstanceRef.current = null;
       if (osmdRef.current) {
         osmdRef.current.innerHTML = "";
       }
     };
   }, [musicxml]);
 
+  useEffect(() => {
+    if (!isPlaying) {
+      if (animationFrameRef.current !== null) {
+        cancelAnimationFrame(animationFrameRef.current);
+      }
+      return;
+    }
+
+    const updatePlayback = () => {
+      const time = audioRef.current?.currentTime ?? 0;
+      setCurrentTime(time);
+      syncScoreCursor(time);
+      animationFrameRef.current = requestAnimationFrame(updatePlayback);
+    };
+    animationFrameRef.current = requestAnimationFrame(updatePlayback);
+
+    return () => {
+      if (animationFrameRef.current !== null) {
+        cancelAnimationFrame(animationFrameRef.current);
+      }
+    };
+  }, [isPlaying, syncScoreCursor]);
+
+  useEffect(() => {
+    return () => {
+      if (audioUrl) URL.revokeObjectURL(audioUrl);
+    };
+  }, [audioUrl]);
+
   const process = useCallback(
     async (file: File) => {
       try {
         setError(null);
         setProgress("Analyzing audio...");
+        audioRef.current?.pause();
+        setMusicxml(null);
+        setAudioFile(file);
+        setAudioUrl(URL.createObjectURL(file));
+        setCurrentTime(0);
+        setDuration(0);
+        setIsPlaying(false);
         // setStage("analyzing");
         console.log("PROCESSING FILE....");
 
@@ -113,6 +201,33 @@ export function UploadStage() {
   const onFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) process(file);
+  };
+
+  const togglePlayback = async () => {
+    const audio = audioRef.current;
+    if (!audio) return;
+
+    if (audio.paused) {
+      if (audio.ended) audio.currentTime = 0;
+      await audio.play();
+      setIsPlaying(true);
+    } else {
+      audio.pause();
+      setIsPlaying(false);
+    }
+  };
+
+  const seekPlayback = (time: number) => {
+    if (!audioRef.current) return;
+    audioRef.current.currentTime = time;
+    setCurrentTime(time);
+    syncScoreCursor(time);
+  };
+
+  const formatTime = (seconds: number) => {
+    if (!Number.isFinite(seconds)) return "0:00";
+    const minutes = Math.floor(seconds / 60);
+    return `${minutes}:${Math.floor(seconds % 60).toString().padStart(2, "0")}`;
   };
 
   return (
@@ -186,13 +301,54 @@ export function UploadStage() {
         ))}
       </div>
 
-      {/* <div ref={osmdRef} id="osmd-container" /> */}
       {musicxml && (
-        <div
-          id="osmd-container"
-          ref={osmdRef}
-          style={{ width: "100%", minHeight: "400px" }}
-        />
+        <div className="w-full rounded-2xl bg-white p-4 shadow-lg">
+          <div
+            id="osmd-container"
+            ref={osmdRef}
+            className="w-full min-h-[260px] overflow-x-auto overflow-y-hidden"
+          />
+
+          {audioUrl && (
+            <div className="flex items-center gap-4 rounded-xl bg-mist p-4">
+              <audio
+                ref={audioRef}
+                src={audioUrl}
+                preload="metadata"
+                onLoadedMetadata={(event) => setDuration(event.currentTarget.duration)}
+                onEnded={() => {
+                  setIsPlaying(false);
+                  setCurrentTime(duration);
+                  syncScoreCursor(duration);
+                }}
+              />
+              <button
+                type="button"
+                onClick={togglePlayback}
+                className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-resonance text-white transition hover:scale-105"
+                aria-label={isPlaying ? "Pause audio" : "Play audio"}
+              >
+                {isPlaying ? <Pause className="h-5 w-5" /> : <Play className="h-5 w-5" />}
+              </button>
+              <span className="w-12 text-right font-mono text-xs text-silver">
+                {formatTime(currentTime)}
+              </span>
+              <input
+                type="range"
+                min={0}
+                max={duration || 0}
+                step={0.01}
+                value={Math.min(currentTime, duration || 0)}
+                onChange={(event) => seekPlayback(Number(event.target.value))}
+                className="min-w-0 flex-1 accent-resonance"
+                aria-label="Audio position"
+              />
+              <span className="w-12 font-mono text-xs text-silver">
+                {formatTime(duration)}
+              </span>
+            </div>
+          )}
+        </div>
       )}
 
       {/* Error */}
