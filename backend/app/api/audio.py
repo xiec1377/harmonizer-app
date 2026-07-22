@@ -11,6 +11,9 @@ from app.services.audio_service import transcribe_basic_pitch
 from app.config import settings
 from app.services.audio_service import analyze_audio
 from basic_pitch.inference import predict
+import librosa
+import numpy as np
+from fractions import Fraction
 
 log = structlog.get_logger()
 router = APIRouter()
@@ -140,8 +143,6 @@ def midi_to_note_name(midi: int) -> str:
 
 
 def _predict_basic_pitch(file_path: str):
-
-
     return predict(file_path)
 
 from fastapi import UploadFile, File, HTTPException
@@ -151,8 +152,8 @@ import aiofiles
 import asyncio
 from music21 import stream, note, tempo, meter, duration
 
-@router.post("/transcribe")
-async def transcribe_audio(file: UploadFile = File(...)):
+@router.post("/transcribe1")
+async def transcribe_audio1(file: UploadFile = File(...)):
     print("TRANSCRIBING ENDPOINT...")
 
     ext = os.path.splitext(file.filename or "")[1].lower()
@@ -200,5 +201,129 @@ async def transcribe_audio(file: UploadFile = File(...)):
         "file_id": file_id,
         "note_count": len(note_events),
         "notes": [int(round(float(n[2]))) for n in note_events],
+        "musicxml": musicxml,
+    }
+    
+@router.post("/transcribe")
+async def transcribe_audio(file: UploadFile = File(...)):
+    print("TRANSCRIBING ENDPOINT...")
+    ext = os.path.splitext(file.filename or "")[1].lower()
+    if ext not in ALLOWED_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file type: {ext}. Allowed: {', '.join(sorted(ALLOWED_EXTENSIONS))}",
+        )
+
+    os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
+    file_id = str(uuid.uuid4())
+    dest = os.path.join(settings.UPLOAD_DIR, f"{file_id}{ext}")
+    total = 0
+
+    try:
+        async with aiofiles.open(dest, "wb") as out:
+            while chunk := await file.read(65536):
+                total += len(chunk)
+                if total > MAX_BYTES:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"File exceeds {settings.MAX_UPLOAD_MB} MB limit",
+                    )
+                await out.write(chunk)
+
+        def detect_pitches():
+            audio, sample_rate = librosa.load(dest, sr=None, mono=True)
+            hop_length = 512
+            frequencies, voiced, probabilities = librosa.pyin(
+                audio,
+                fmin=librosa.note_to_hz("C2"),
+                fmax=librosa.note_to_hz("C7"),
+                sr=sample_rate,
+                hop_length=hop_length,
+            )
+            times = librosa.times_like(
+                frequencies, sr=sample_rate, hop_length=hop_length
+            )
+            pitch_frames = [
+                {
+                    "time": round(float(time), 3),
+                    "frequency_hz": round(float(frequency), 2),
+                    "note": str(librosa.hz_to_note(frequency)),
+                    "midi": int(round(float(librosa.hz_to_midi(frequency)))),
+                    "confidence": round(float(probability), 3),
+                }
+                for time, frequency, is_voiced, probability in zip(
+                    times, frequencies, voiced, probabilities
+                )
+                if is_voiced and np.isfinite(frequency)
+            ]
+
+            # Collapse adjacent pitch frames into readable, sustained score notes.
+            score_notes = []
+            current_midi = None
+            start_frame = 0
+            for frame_index, (frequency, is_voiced) in enumerate(
+                zip(frequencies, voiced)
+            ):
+                midi = (
+                    int(round(float(librosa.hz_to_midi(frequency))))
+                    if is_voiced and np.isfinite(frequency)
+                    else None
+                )
+                if midi != current_midi:
+                    if current_midi is not None:
+                        score_notes.append(
+                            (current_midi, frame_index - start_frame)
+                        )
+                    current_midi = midi
+                    start_frame = frame_index
+
+            if current_midi is not None:
+                score_notes.append((current_midi, len(frequencies) - start_frame))
+
+            score = stream.Score()
+            part = stream.Part()
+            part.append(tempo.MetronomeMark(number=120))
+            part.append(meter.TimeSignature("4/4"))
+            seconds_per_frame = hop_length / sample_rate
+            for midi, frame_count in score_notes:
+                # At 120 BPM, one quarter note lasts 0.5 seconds.
+                raw_quarter_length = frame_count * seconds_per_frame * 2
+                # Use exact sixteenth-note units that MusicXML can represent.
+                sixteenth_count = max(1, round(raw_quarter_length * 4))
+                quarter_length = Fraction(sixteenth_count, 4)
+                part.append(note.Note(midi, quarterLength=quarter_length))
+            score.append(part)
+            score.makeNotation(inPlace=True)
+
+            xml_dest = os.path.join(settings.UPLOAD_DIR, f"{file_id}.musicxml")
+            try:
+                musicxml_path = score.write("musicxml", fp=xml_dest)
+                with open(musicxml_path, "r", encoding="utf-8") as xml_file:
+                    musicxml = xml_file.read()
+            finally:
+                if os.path.exists(xml_dest):
+                    os.remove(xml_dest)
+
+            return pitch_frames, score_notes, musicxml
+
+        notes, score_notes, musicxml = await asyncio.to_thread(detect_pitches)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        log.exception("pitch_detection_failed", file_id=file_id, error=str(exc))
+        raise HTTPException(
+            status_code=422,
+            detail=f"Could not decode or analyze the audio file: {exc}",
+        ) from exc
+    finally:
+        if os.path.exists(dest):
+            os.remove(dest)
+        await file.close()
+
+    return {
+        "file_id": file_id,
+        "filename": file.filename,
+        "note_count": len(score_notes),
+        "notes": notes,
         "musicxml": musicxml,
     }
